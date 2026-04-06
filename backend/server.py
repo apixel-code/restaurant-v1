@@ -48,6 +48,16 @@ REVIEW_RATE_LIMIT = int(os.environ.get("REVIEW_RATE_LIMIT", "5"))
 allowed_origins_env = os.environ.get("CORS_ALLOW_ORIGINS", "")
 ALLOWED_ORIGINS = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
 
+if "*" in ALLOWED_ORIGINS:
+    if APP_ENV == "production":
+        raise RuntimeError("CORS_ALLOW_ORIGINS cannot contain '*' in production when allow_credentials is enabled")
+    ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    logging.getLogger(__name__).warning("CORS_ALLOW_ORIGINS='*' is invalid with credentials; falling back to localhost origins for development")
+
+if APP_ENV != "production" and COOKIE_SECURE:
+    COOKIE_SECURE = False
+    logging.getLogger(__name__).warning("COOKIE_SECURE=true prevents cookies over HTTP in development; forcing COOKIE_SECURE=false")
+
 if APP_ENV == "production" and not ALLOWED_ORIGINS:
     raise RuntimeError("CORS_ALLOW_ORIGINS must be set in production")
 
