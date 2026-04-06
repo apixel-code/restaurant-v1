@@ -14,19 +14,22 @@ export default function BlogPost() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    const fetchBlog = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const { data } = await axios.get(`${API}/blogs/${slug}`);
+        setBlog(data);
+      } catch (error) {
+        setError('Blog post not found');
+      } finally {
+        setLoading(false);
+      }
+    };
+
     fetchBlog();
   }, [slug]);
-
-  const fetchBlog = async () => {
-    try {
-      const { data } = await axios.get(`${API}/blogs/${slug}`);
-      setBlog(data);
-    } catch (error) {
-      setError('Blog post not found');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('en-US', {

@@ -31,38 +31,37 @@ export default function Menu() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const fetchCategories = async () => {
+      try {
+        const { data } = await axios.get(`${API}/categories`);
+        setCategories(data);
+      } catch (error) {
+        console.error('Error fetching categories:', error);
+      }
+    };
+
     fetchCategories();
-    fetchProducts();
   }, []);
 
   useEffect(() => {
+    const fetchProducts = async () => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (selectedCategory !== 'All') params.append('category', selectedCategory);
+        if (searchQuery) params.append('search', searchQuery);
+        
+        const { data } = await axios.get(`${API}/products?${params}`);
+        setProducts(data);
+      } catch (error) {
+        console.error('Error fetching products:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
     fetchProducts();
   }, [selectedCategory, searchQuery]);
-
-  const fetchCategories = async () => {
-    try {
-      const { data } = await axios.get(`${API}/categories`);
-      setCategories(data);
-    } catch (error) {
-      console.error('Error fetching categories:', error);
-    }
-  };
-
-  const fetchProducts = async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (selectedCategory !== 'All') params.append('category', selectedCategory);
-      if (searchQuery) params.append('search', searchQuery);
-      
-      const { data } = await axios.get(`${API}/products?${params}`);
-      setProducts(data);
-    } catch (error) {
-      console.error('Error fetching products:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const orderOnWhatsApp = (product) => {
     const message = `Hi! I want to order: ${product.name_en} - ৳${product.price}. Please confirm.`;

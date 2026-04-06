@@ -4,27 +4,58 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pydantic import BaseModel, Field, ConfigDict, EmailStr
+from pydantic import BaseModel, Field, ConfigDict, EmailStr, field_validator
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
-from bson import ObjectId
+import bleach
+from collections import defaultdict, deque
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
+mongo_client_options = {}
+mongo_tls_ca_file = os.environ.get("MONGO_TLS_CA_FILE")
+if mongo_tls_ca_file:
+    mongo_client_options["tlsCAFile"] = mongo_tls_ca_file
+mongo_server_selection_timeout_ms = os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS")
+if mongo_server_selection_timeout_ms:
+    mongo_client_options["serverSelectionTimeoutMS"] = int(mongo_server_selection_timeout_ms)
+
+client = AsyncIOMotorClient(mongo_url, **mongo_client_options)
 db = client[os.environ['DB_NAME']]
 
 # JWT Configuration
 JWT_SECRET = os.environ.get('JWT_SECRET', 'panshi-restaurant-secret-key-2024')
 JWT_ALGORITHM = "HS256"
+APP_ENV = os.environ.get("APP_ENV", "development").lower()
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true" if APP_ENV == "production" else "false").lower() == "true"
+COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax" if APP_ENV != "production" else "none").lower()
+COOKIE_DOMAIN = os.environ.get("COOKIE_DOMAIN") or None
+CREATE_ADMIN_ON_STARTUP = os.environ.get("CREATE_ADMIN_ON_STARTUP", "false" if APP_ENV == "production" else "true").lower() == "true"
+ENABLE_SEEDING = os.environ.get("ENABLE_SEEDING", "false" if APP_ENV == "production" else "true").lower() == "true"
+WRITE_TEST_CREDENTIALS = os.environ.get("WRITE_TEST_CREDENTIALS", "false").lower() == "true"
+RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "300"))
+CONTACT_RATE_LIMIT = int(os.environ.get("CONTACT_RATE_LIMIT", "5"))
+REVIEW_RATE_LIMIT = int(os.environ.get("REVIEW_RATE_LIMIT", "5"))
+
+allowed_origins_env = os.environ.get("CORS_ALLOW_ORIGINS", "")
+ALLOWED_ORIGINS = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+
+if APP_ENV == "production" and not ALLOWED_ORIGINS:
+    raise RuntimeError("CORS_ALLOW_ORIGINS must be set in production")
+
+if COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+    raise RuntimeError("COOKIE_SAMESITE must be one of: lax, strict, none")
+
+if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
+    raise RuntimeError("COOKIE_SECURE must be true when COOKIE_SAMESITE is 'none'")
 
 # Create the main app
 app = FastAPI(title="Panshi Restaurant API")
@@ -36,15 +67,57 @@ api_router = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+ALLOWED_BLOG_TAGS = [
+    "p", "br", "strong", "em", "u", "ul", "ol", "li",
+    "h2", "h3", "h4", "blockquote", "a"
+]
+ALLOWED_BLOG_ATTRIBUTES = {
+    "a": ["href", "title", "target", "rel"],
+}
+rate_limit_store = defaultdict(deque)
+
+
+def sanitize_blog_html(content: str) -> str:
+    cleaned = bleach.clean(
+        content,
+        tags=ALLOWED_BLOG_TAGS,
+        attributes=ALLOWED_BLOG_ATTRIBUTES,
+        protocols=["http", "https", "mailto"],
+        strip=True,
+    )
+    return bleach.linkify(cleaned)
+
+
+def get_client_identifier(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def enforce_rate_limit(key: str, limit: int) -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    bucket = rate_limit_store[key]
+
+    while bucket and now - bucket[0] > RATE_LIMIT_WINDOW_SECONDS:
+        bucket.popleft()
+
+    if len(bucket) >= limit:
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+
+    bucket.append(now)
+
 # ============== MODELS ==============
 
 class ProductBase(BaseModel):
-    name_en: str
-    name_bn: str
-    category: str
-    description: str
-    price: float
-    image_url: str
+    name_en: str = Field(min_length=2, max_length=120)
+    name_bn: str = Field(min_length=2, max_length=120)
+    category: str = Field(min_length=2, max_length=60)
+    description: str = Field(min_length=10, max_length=500)
+    price: float = Field(gt=0, le=100000)
+    image_url: str = Field(min_length=5, max_length=500)
     in_stock: bool = True
 
 class ProductCreate(ProductBase):
@@ -56,12 +129,27 @@ class Product(ProductBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class BlogPostBase(BaseModel):
-    title: str
-    slug: str
-    content: str
-    thumbnail_url: str
-    author: str
+    title: str = Field(min_length=5, max_length=160)
+    slug: str = Field(min_length=3, max_length=180)
+    content: str = Field(min_length=20, max_length=50000)
+    thumbnail_url: str = Field(default="", max_length=500)
+    author: str = Field(min_length=2, max_length=80)
     published: bool = False
+
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-" for ch in normalized):
+            raise ValueError("Slug may contain only lowercase letters, numbers, and hyphens")
+        return normalized
+
+    @field_validator("thumbnail_url")
+    @classmethod
+    def validate_thumbnail_url(cls, value: str) -> str:
+        if value and not value.startswith(("http://", "https://")):
+            raise ValueError("Thumbnail URL must start with http:// or https://")
+        return value
 
 class BlogPostCreate(BlogPostBase):
     pass
@@ -72,9 +160,9 @@ class BlogPost(BlogPostBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class ReviewBase(BaseModel):
-    reviewer_name: str
-    rating: int
-    comment: str
+    reviewer_name: str = Field(min_length=2, max_length=80)
+    rating: int = Field(ge=1, le=5)
+    comment: str = Field(min_length=10, max_length=1000)
 
 class ReviewCreate(ReviewBase):
     pass
@@ -86,9 +174,9 @@ class Review(ReviewBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class ContactBase(BaseModel):
-    name: str
-    phone: str
-    message: str
+    name: str = Field(min_length=2, max_length=80)
+    phone: str = Field(min_length=7, max_length=30)
+    message: str = Field(min_length=10, max_length=2000)
 
 class ContactCreate(ContactBase):
     pass
@@ -148,6 +236,13 @@ async def get_current_user(request: Request) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+
+async def get_admin_user(request: Request) -> dict:
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
 # ============== AUTH ROUTES ==============
 
 @api_router.post("/auth/login")
@@ -164,16 +259,17 @@ async def login(credentials: UserLogin, response: Response):
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
         max_age=86400,
-        path="/"
+        path="/",
+        domain=COOKIE_DOMAIN
     )
-    return {"id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"], "token": access_token}
+    return {"id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"]}
 
 @api_router.post("/auth/logout")
 async def logout(response: Response):
-    response.delete_cookie(key="access_token", path="/")
+    response.delete_cookie(key="access_token", path="/", domain=COOKIE_DOMAIN)
     return {"message": "Logged out successfully"}
 
 @api_router.get("/auth/me")
@@ -210,7 +306,7 @@ async def get_product(product_id: str):
 
 @api_router.post("/products", response_model=Product)
 async def create_product(product: ProductCreate, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     product_obj = Product(**product.model_dump())
     doc = product_obj.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
@@ -219,7 +315,7 @@ async def create_product(product: ProductCreate, request: Request):
 
 @api_router.put("/products/{product_id}", response_model=Product)
 async def update_product(product_id: str, product: ProductCreate, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     existing = await db.products.find_one({"id": product_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -232,7 +328,7 @@ async def update_product(product_id: str, product: ProductCreate, request: Reque
 
 @api_router.delete("/products/{product_id}")
 async def delete_product(product_id: str, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     result = await db.products.delete_one({"id": product_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -240,7 +336,7 @@ async def delete_product(product_id: str, request: Request):
 
 @api_router.patch("/products/{product_id}/stock")
 async def toggle_product_stock(product_id: str, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     product = await db.products.find_one({"id": product_id})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -266,7 +362,7 @@ async def get_blogs(published_only: bool = True):
 
 @api_router.get("/blogs/all", response_model=List[BlogPost])
 async def get_all_blogs(request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     blogs = await db.blog_posts.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
     for b in blogs:
         if isinstance(b.get('created_at'), str):
@@ -280,12 +376,15 @@ async def get_blog_by_slug(slug: str):
         raise HTTPException(status_code=404, detail="Blog post not found")
     if isinstance(blog.get('created_at'), str):
         blog['created_at'] = datetime.fromisoformat(blog['created_at'].replace('Z', '+00:00'))
+    blog['content'] = sanitize_blog_html(blog.get('content', ''))
     return blog
 
 @api_router.post("/blogs", response_model=BlogPost)
 async def create_blog(blog: BlogPostCreate, request: Request):
-    await get_current_user(request)
-    blog_obj = BlogPost(**blog.model_dump())
+    await get_admin_user(request)
+    payload = blog.model_dump()
+    payload["content"] = sanitize_blog_html(payload["content"])
+    blog_obj = BlogPost(**payload)
     doc = blog_obj.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.blog_posts.insert_one(doc)
@@ -293,20 +392,22 @@ async def create_blog(blog: BlogPostCreate, request: Request):
 
 @api_router.put("/blogs/{blog_id}", response_model=BlogPost)
 async def update_blog(blog_id: str, blog: BlogPostCreate, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     existing = await db.blog_posts.find_one({"id": blog_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Blog not found")
     update_data = blog.model_dump()
+    update_data["content"] = sanitize_blog_html(update_data["content"])
     await db.blog_posts.update_one({"id": blog_id}, {"$set": update_data})
     updated = await db.blog_posts.find_one({"id": blog_id}, {"_id": 0})
     if isinstance(updated.get('created_at'), str):
         updated['created_at'] = datetime.fromisoformat(updated['created_at'].replace('Z', '+00:00'))
+    updated['content'] = sanitize_blog_html(updated.get('content', ''))
     return updated
 
 @api_router.delete("/blogs/{blog_id}")
 async def delete_blog(blog_id: str, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     result = await db.blog_posts.delete_one({"id": blog_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Blog not found")
@@ -325,7 +426,7 @@ async def get_reviews(approved_only: bool = True):
 
 @api_router.get("/reviews/all", response_model=List[Review])
 async def get_all_reviews(request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     reviews = await db.reviews.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
     for r in reviews:
         if isinstance(r.get('created_at'), str):
@@ -333,7 +434,8 @@ async def get_all_reviews(request: Request):
     return reviews
 
 @api_router.post("/reviews", response_model=Review)
-async def create_review(review: ReviewCreate):
+async def create_review(review: ReviewCreate, request: Request):
+    enforce_rate_limit(f"review:{get_client_identifier(request)}", REVIEW_RATE_LIMIT)
     review_obj = Review(**review.model_dump())
     doc = review_obj.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
@@ -342,7 +444,7 @@ async def create_review(review: ReviewCreate):
 
 @api_router.patch("/reviews/{review_id}/approve")
 async def toggle_review_approval(review_id: str, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     review = await db.reviews.find_one({"id": review_id})
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
@@ -352,7 +454,7 @@ async def toggle_review_approval(review_id: str, request: Request):
 
 @api_router.delete("/reviews/{review_id}")
 async def delete_review(review_id: str, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     result = await db.reviews.delete_one({"id": review_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Review not found")
@@ -361,7 +463,8 @@ async def delete_review(review_id: str, request: Request):
 # ============== CONTACT ROUTES ==============
 
 @api_router.post("/contacts", response_model=Contact)
-async def create_contact(contact: ContactCreate):
+async def create_contact(contact: ContactCreate, request: Request):
+    enforce_rate_limit(f"contact:{get_client_identifier(request)}", CONTACT_RATE_LIMIT)
     contact_obj = Contact(**contact.model_dump())
     doc = contact_obj.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
@@ -370,7 +473,7 @@ async def create_contact(contact: ContactCreate):
 
 @api_router.get("/contacts", response_model=List[Contact])
 async def get_contacts(request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     contacts = await db.contacts.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
     for c in contacts:
         if isinstance(c.get('created_at'), str):
@@ -379,7 +482,7 @@ async def get_contacts(request: Request):
 
 @api_router.delete("/contacts/{contact_id}")
 async def delete_contact(contact_id: str, request: Request):
-    await get_current_user(request)
+    await get_admin_user(request)
     result = await db.contacts.delete_one({"id": contact_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Contact not found")
@@ -398,39 +501,41 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS or ["http://localhost:3000"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # ============== SEED DATA ==============
 
 async def seed_data():
-    # Seed admin user
     admin_email = os.environ.get('ADMIN_EMAIL', 'Admin@restaurant.com').lower()
     admin_password = os.environ.get('ADMIN_PASSWORD', 'Admin@123')
+
+    if CREATE_ADMIN_ON_STARTUP:
+        existing_admin = await db.users.find_one({"email": admin_email})
+        if not existing_admin:
+            admin_user = {
+                "id": str(uuid.uuid4()),
+                "email": admin_email,
+                "password_hash": hash_password(admin_password),
+                "name": "Admin",
+                "role": "admin",
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.users.insert_one(admin_user)
+            logger.info(f"Admin user created: {admin_email}")
+        else:
+            if not verify_password(admin_password, existing_admin["password_hash"]):
+                await db.users.update_one(
+                    {"email": admin_email},
+                    {"$set": {"password_hash": hash_password(admin_password)}}
+                )
+                logger.info("Admin password updated")
     
-    existing_admin = await db.users.find_one({"email": admin_email})
-    if not existing_admin:
-        admin_user = {
-            "id": str(uuid.uuid4()),
-            "email": admin_email,
-            "password_hash": hash_password(admin_password),
-            "name": "Admin",
-            "role": "admin",
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        await db.users.insert_one(admin_user)
-        logger.info(f"Admin user created: {admin_email}")
-    else:
-        # Update password if changed
-        if not verify_password(admin_password, existing_admin["password_hash"]):
-            await db.users.update_one(
-                {"email": admin_email},
-                {"$set": {"password_hash": hash_password(admin_password)}}
-            )
-            logger.info("Admin password updated")
-    
+    if not ENABLE_SEEDING:
+        return
+
     # Seed sample products (Food Panda style Bengali cuisine)
     product_count = await db.products.count_documents({})
     if product_count == 0:
@@ -516,11 +621,11 @@ async def seed_data():
         await db.blog_posts.insert_many(sample_blogs)
         logger.info(f"Seeded {len(sample_blogs)} sample blog posts")
     
-    # Write test credentials
-    credentials_dir = Path("/app/memory")
-    credentials_dir.mkdir(exist_ok=True)
-    credentials_file = credentials_dir / "test_credentials.md"
-    credentials_content = f"""# Test Credentials
+    if WRITE_TEST_CREDENTIALS:
+        credentials_dir = Path("/app/memory")
+        credentials_dir.mkdir(parents=True, exist_ok=True)
+        credentials_file = credentials_dir / "test_credentials.md"
+        credentials_content = f"""# Test Credentials
 
 ## Admin Account
 - **Email**: {admin_email}
@@ -532,8 +637,8 @@ async def seed_data():
 - POST /api/auth/logout - Logout
 - GET /api/auth/me - Get current user
 """
-    credentials_file.write_text(credentials_content)
-    logger.info("Test credentials written to /app/memory/test_credentials.md")
+        credentials_file.write_text(credentials_content)
+        logger.info("Test credentials written to /app/memory/test_credentials.md")
 
 @app.on_event("startup")
 async def startup_event():

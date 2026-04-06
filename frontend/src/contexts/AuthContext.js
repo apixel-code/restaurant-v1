@@ -8,15 +8,6 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 // Configure axios defaults
 axios.defaults.withCredentials = true;
 
-// Add request interceptor for auth token
-axios.interceptors.request.use((config) => {
-  const token = localStorage.getItem('access_token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
-});
-
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -31,7 +22,6 @@ export function AuthProvider({ children }) {
       setUser(data);
     } catch (error) {
       setUser(null);
-      localStorage.removeItem('access_token');
     } finally {
       setLoading(false);
     }
@@ -39,10 +29,6 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     const { data } = await axios.post(`${API}/auth/login`, { email, password });
-    // Store token in localStorage as fallback
-    if (data.token) {
-      localStorage.setItem('access_token', data.token);
-    }
     setUser(data);
     return data;
   };
@@ -53,7 +39,6 @@ export function AuthProvider({ children }) {
     } catch (e) {
       // Ignore logout errors
     }
-    localStorage.removeItem('access_token');
     setUser(null);
   };
 
