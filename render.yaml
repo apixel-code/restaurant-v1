@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: restaurant-v1-backend
+    runtime: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.2
+      - key: APP_ENV
+        value: production
+      - key: DB_NAME
+        value: panshi_restaurant
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: CREATE_ADMIN_ON_STARTUP
+        value: "false"
+      - key: ENABLE_SEEDING
+        value: "false"
+      - key: WRITE_TEST_CREDENTIALS
+        value: "false"
+      - key: CORS_ALLOW_ORIGINS
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: MONGO_URL
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
