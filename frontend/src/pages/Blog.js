@@ -2,11 +2,9 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Helmet } from 'react-helmet-async';
 import { motion } from 'framer-motion';
-import axios from 'axios';
 import { Calendar, User, ArrowRight } from 'lucide-react';
 import { Card, CardContent } from '../components/ui/card';
-
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+import { getWithRetry } from '../lib/api';
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -24,21 +22,36 @@ const itemVariants = {
 export default function Blog() {
   const [blogs, setBlogs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    fetchBlogs();
-  }, []);
+    let isMounted = true;
 
-  const fetchBlogs = async () => {
-    try {
-      const { data } = await axios.get(`${API}/blogs`);
-      setBlogs(data);
-    } catch (error) {
-      console.error('Error fetching blogs:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    const fetchBlogs = async () => {
+      setLoading(true);
+      setError('');
+
+      try {
+        const { data } = await getWithRetry('/blogs');
+        if (!isMounted) return;
+        setBlogs(data);
+      } catch (fetchError) {
+        if (!isMounted) return;
+        setError('The server is waking up. Please try again in a few seconds.');
+        console.error('Error fetching blogs:', fetchError);
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchBlogs();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('en-US', {
@@ -93,7 +106,9 @@ export default function Blog() {
             </div>
           ) : blogs.length === 0 ? (
             <div className="text-center py-16">
-              <p className="text-cream/60 text-lg">No blog posts yet. Check back soon!</p>
+              <p className="text-cream/60 text-lg">
+                {error || 'No blog posts yet. Check back soon!'}
+              </p>
             </div>
           ) : (
             <motion.div

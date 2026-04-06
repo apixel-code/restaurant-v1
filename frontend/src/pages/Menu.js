@@ -1,14 +1,12 @@
 import { useState, useEffect } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { motion } from 'framer-motion';
-import axios from 'axios';
 import { Search, X } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { Card, CardContent } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs';
-
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+import { getWithRetry } from '../lib/api';
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -29,38 +27,61 @@ export default function Menu() {
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
+    let isMounted = true;
+
     const fetchCategories = async () => {
       try {
-        const { data } = await axios.get(`${API}/categories`);
+        const { data } = await getWithRetry('/categories');
+        if (!isMounted) return;
         setCategories(data);
       } catch (error) {
+        if (!isMounted) return;
+        setError('The server is waking up. Menu data may take a few seconds to appear.');
         console.error('Error fetching categories:', error);
       }
     };
 
     fetchCategories();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
     const fetchProducts = async () => {
       setLoading(true);
+      setError('');
+
       try {
         const params = new URLSearchParams();
         if (selectedCategory !== 'All') params.append('category', selectedCategory);
         if (searchQuery) params.append('search', searchQuery);
         
-        const { data } = await axios.get(`${API}/products?${params}`);
+        const { data } = await getWithRetry(`/products?${params}`);
+        if (!isMounted) return;
         setProducts(data);
       } catch (error) {
+        if (!isMounted) return;
+        setError('The server is waking up. Please wait a few seconds and try again.');
         console.error('Error fetching products:', error);
       } finally {
-        setLoading(false);
+        if (isMounted) {
+          setLoading(false);
+        }
       }
     };
 
     fetchProducts();
+
+    return () => {
+      isMounted = false;
+    };
   }, [selectedCategory, searchQuery]);
 
   const orderOnWhatsApp = (product) => {
@@ -164,7 +185,9 @@ export default function Menu() {
             </div>
           ) : products.length === 0 ? (
             <div className="text-center py-16">
-              <p className="text-cream/60 text-lg">No dishes found matching your criteria.</p>
+              <p className="text-cream/60 text-lg">
+                {error || 'No dishes found matching your criteria.'}
+              </p>
               <button
                 onClick={() => { setSearchQuery(''); setSelectedCategory('All'); }}
                 className="mt-4 text-primary hover:underline"

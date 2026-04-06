@@ -2,11 +2,9 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Helmet } from 'react-helmet-async';
 import { motion } from 'framer-motion';
-import axios from 'axios';
 import { ChefHat, Truck, Leaf, BadgeDollarSign, Star, MapPin, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Card, CardContent } from '../components/ui/card';
-
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+import { getWithRetry } from '../lib/api';
 
 const HERO_BG = "https://static.prod-images.emergentagent.com/jobs/3330e33a-96b1-42f2-92f1-58cb71a063d6/images/e094072f91b5cd08500507d024961645151601df1495c51abb2f8001bb334f2c.png";
 
@@ -35,10 +33,36 @@ export default function Home() {
   const [reviews, setReviews] = useState([]);
   const [currentSlide, setCurrentSlide] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
+  const [contentError, setContentError] = useState('');
 
   useEffect(() => {
-    fetchProducts();
-    fetchReviews();
+    let isMounted = true;
+
+    const loadHomeContent = async () => {
+      setContentError('');
+
+      try {
+        const [productsResponse, reviewsResponse] = await Promise.all([
+          getWithRetry('/products'),
+          getWithRetry('/reviews', {}, { warmup: false }),
+        ]);
+
+        if (!isMounted) return;
+
+        setProducts(productsResponse.data.slice(0, 8));
+        setReviews(reviewsResponse.data);
+      } catch (error) {
+        if (!isMounted) return;
+        setContentError('The server is waking up. Please wait a few seconds and refresh.');
+        console.error('Error fetching homepage content:', error);
+      }
+    };
+
+    loadHomeContent();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -48,24 +72,6 @@ export default function Home() {
     }, 3000);
     return () => clearInterval(interval);
   }, [products, isPaused]);
-
-  const fetchProducts = async () => {
-    try {
-      const { data } = await axios.get(`${API}/products`);
-      setProducts(data.slice(0, 8));
-    } catch (error) {
-      console.error('Error fetching products:', error);
-    }
-  };
-
-  const fetchReviews = async () => {
-    try {
-      const { data } = await axios.get(`${API}/reviews`);
-      setReviews(data);
-    } catch (error) {
-      console.error('Error fetching reviews:', error);
-    }
-  };
 
   const nextSlide = () => setCurrentSlide((prev) => (prev + 1) % Math.max(1, products.length - 2));
   const prevSlide = () => setCurrentSlide((prev) => (prev - 1 + Math.max(1, products.length - 2)) % Math.max(1, products.length - 2));
@@ -148,6 +154,11 @@ export default function Home() {
             <p className="text-cream/70 text-lg sm:text-xl mb-8 max-w-2xl mx-auto">
               Authentic Bengali Cuisine • Traditional Recipes • Made with Love
             </p>
+            {contentError ? (
+              <p className="text-primary text-sm sm:text-base mb-6 max-w-2xl mx-auto">
+                {contentError}
+              </p>
+            ) : null}
             <a
               href="https://wa.me/8801322411534?text=Hello,%20I'd%20like%20to%20place%20an%20order!"
               target="_blank"
@@ -342,6 +353,11 @@ export default function Home() {
               </motion.div>
             ))}
           </motion.div>
+          {!reviews.length && contentError ? (
+            <p className="text-center text-cream/60 mt-8">
+              Reviews will appear once the backend finishes waking up.
+            </p>
+          ) : null}
         </div>
       </section>
 
