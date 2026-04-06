@@ -253,10 +253,10 @@ export default function Home() {
               {products.map((product) => (
                 <div
                   key={product.id}
-                  className="min-w-[280px] md:min-w-[350px] flex-shrink-0"
+                  className="w-[280px] sm:w-[300px] md:w-[320px] lg:w-[350px] flex-shrink-0"
                 >
-                  <Card className="bg-surface/40 border-primary/20 overflow-hidden card-hover">
-                    <div className="aspect-[4/3] overflow-hidden">
+                  <Card className="bg-surface/40 border-primary/20 overflow-hidden card-hover h-full flex flex-col">
+                    <div className="h-[180px] sm:h-[200px] md:h-[220px] overflow-hidden">
                       <img
                         src={product.image_url}
                         alt={product.name_en}
@@ -264,16 +264,16 @@ export default function Home() {
                         loading="lazy"
                       />
                     </div>
-                    <CardContent className="p-6">
-                      <h3 className="font-serif text-xl text-cream mb-1">{product.name_en}</h3>
+                    <CardContent className="p-5 sm:p-6 flex flex-col flex-1">
+                      <h3 className="font-serif text-lg sm:text-xl text-cream mb-1 line-clamp-1">{product.name_en}</h3>
                       <p className="text-primary text-sm mb-2">{product.name_bn}</p>
-                      <p className="text-cream/60 text-sm mb-4 line-clamp-2">{product.description}</p>
-                      <div className="flex items-center justify-between">
-                        <span className="text-2xl font-bold text-primary">৳{product.price}</span>
+                      <p className="text-cream/60 text-sm mb-4 line-clamp-2 flex-1">{product.description}</p>
+                      <div className="flex items-center justify-between mt-auto">
+                        <span className="text-xl sm:text-2xl font-bold text-primary">৳{product.price}</span>
                         <button
                           onClick={() => orderOnWhatsApp(product)}
                           data-testid={`order-${product.id}`}
-                          className="px-4 py-2 bg-whatsapp text-white text-sm font-bold uppercase tracking-wider rounded-full hover:bg-whatsapp/90 transition-colors"
+                          className="px-3 sm:px-4 py-2 bg-whatsapp text-white text-xs sm:text-sm font-bold uppercase tracking-wider rounded-full hover:bg-whatsapp/90 transition-colors"
                         >
                           Order
                         </button>
