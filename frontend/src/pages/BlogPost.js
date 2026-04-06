@@ -44,6 +44,7 @@ export default function BlogPost() {
   };
 
   const shareOnWhatsApp = () => {
+    if (!blog) return;
     window.open(
       `https://wa.me/?text=${encodeURIComponent(`Check out this article: ${blog.title} - ${window.location.href}`)}`,
       '_blank'
@@ -88,11 +89,11 @@ export default function BlogPost() {
   return (
     <>
       <Helmet>
-        <title>{blog.title} | Panshi Restaurants Blog</title>
-        <meta name="description" content={blog.content.replace(/<[^>]+>/g, '').substring(0, 160)} />
-        <meta property="og:title" content={blog.title} />
-        <meta property="og:description" content={blog.content.replace(/<[^>]+>/g, '').substring(0, 160)} />
-        <meta property="og:image" content={blog.thumbnail_url} />
+        <title>{blog?.title ? `${blog.title} | Panshi Restaurants Blog` : 'Loading... | Panshi Restaurants Blog'}</title>
+        <meta name="description" content={blog?.content ? blog.content.replace(/<[^>]+>/g, '').substring(0, 160) : 'Panshi Restaurants Blog'} />
+        <meta property="og:title" content={blog?.title || 'Panshi Restaurants Blog'} />
+        <meta property="og:description" content={blog?.content ? blog.content.replace(/<[^>]+>/g, '').substring(0, 160) : 'Panshi Restaurants Blog'} />
+        <meta property="og:image" content={blog?.thumbnail_url || ''} />
         <meta property="og:url" content={window.location.href} />
         <link rel="canonical" href={window.location.href} />
       </Helmet>
